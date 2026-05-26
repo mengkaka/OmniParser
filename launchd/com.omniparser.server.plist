@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.omniparser.server</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>@PYTHON_BIN@</string>
+		<string>-m</string>
+		<string>omnitool.omniparserserver.omniparserserver</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8000</string>
+		<string>--som_model_path</string>
+		<string>weights/icon_detect/model.pt</string>
+		<string>--caption_model_path</string>
+		<string>weights/icon_caption_florence</string>
+		<string>--caption_model_name</string>
+		<string>florence2</string>
+		<string>--device</string>
+		<string>auto</string>
+		<string>--BOX_TRESHOLD</string>
+		<string>0.05</string>
+		<string>--iou_threshold</string>
+		<string>0.7</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>@PROJECT_ROOT@</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>@CONDA_BIN_DIR@:/usr/bin:/bin</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>@PROJECT_ROOT@/logs/omniparser.stdout.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>@PROJECT_ROOT@/logs/omniparser.stderr.log</string>
+
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+</dict>
+</plist>

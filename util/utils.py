@@ -19,16 +19,21 @@ import numpy as np
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
-reader = easyocr.Reader(['en'])
+# Simplified Chinese + English (use ch_tra instead of ch_sim for Traditional Chinese UI)
+reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+#paddle_ocr = PaddleOCR(
+#    lang='ch',
+#    use_angle_cls=False,
+#    use_gpu=False,  # using cuda will conflict with pytorch in the same process
+#    show_log=False,
+#    max_batch_size=1024,
+#    use_dilation=True,  # improves accuracy
+#    det_db_score_mode='slow',  # improves accuracy
+#    rec_batch_num=1024)
 paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
+    lang='ch',
+    use_angle_cls=True,
+)
 import time
 import base64
 
@@ -44,9 +49,32 @@ import torchvision.transforms as T
 from util.box_annotator import BoxAnnotator 
 
 
+def get_torch_device() -> str:
+    """Prefer CUDA, then Apple MPS, else CPU."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def resolve_torch_device(device: str = "auto") -> str:
+    """Resolve device string from CLI/API: auto|cpu|cuda|mps."""
+    device = (device or "auto").lower()
+    if device == "auto":
+        return get_torch_device()
+    if device == "cuda" and not torch.cuda.is_available():
+        print("CUDA not available, falling back to CPU")
+        return "cpu"
+    if device == "mps" and not torch.backends.mps.is_available():
+        print("MPS not available, falling back to CPU")
+        return "cpu"
+    return device
+
+
 def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
     if not device:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_torch_device()
     if model_name == "blip2":
         from transformers import Blip2Processor, Blip2ForConditionalGeneration
         processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
@@ -79,10 +107,10 @@ def get_yolo_model(model_path):
 def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=None, batch_size=128):
     # Number of samples per batch, --> 128 roughly takes 4 GB of GPU memory for florence v2 model
     to_pil = ToPILImage()
-    if starting_idx:
+    if starting_idx is not None and starting_idx >= 0:
         non_ocr_boxes = filtered_boxes[starting_idx:]
     else:
-        non_ocr_boxes = filtered_boxes
+        non_ocr_boxes = []
     croped_pil_image = []
     for i, coord in enumerate(non_ocr_boxes):
         try:
@@ -107,7 +135,7 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
         start = time.time()
         batch = croped_pil_image[i:i+batch_size]
         t1 = time.time()
-        if model.device.type == 'cuda':
+        if model.device.type in ("cuda", "mps"):
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
         else:
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
@@ -404,7 +432,7 @@ def int_box_area(box, w, h):
     area = (int_box[2] - int_box[0]) * (int_box[3] - int_box[1])
     return area
 
-def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_TRESHOLD=0.01, output_coord_in_ratio=False, ocr_bbox=None, text_scale=0.4, text_padding=5, draw_bbox_config=None, caption_model_processor=None, ocr_text=[], use_local_semantics=True, iou_threshold=0.9,prompt=None, scale_img=False, imgsz=None, batch_size=128):
+def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_TRESHOLD=0.01, output_coord_in_ratio=False, ocr_bbox=None, text_scale=0.4, text_padding=5, draw_bbox_config=None, caption_model_processor=None, ocr_text=[], use_local_semantics=True, iou_threshold=0.9,prompt=None, scale_img=False, imgsz=None, batch_size=128, return_som_image=True):
     """Process either an image path or Image object
     
     Args:
@@ -423,15 +451,15 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     image_source = np.asarray(image_source)
     phrases = [str(i) for i in range(len(phrases))]
 
-    # annotate the image with labels
+    ocr_text = ocr_text or []
     if ocr_bbox:
-        ocr_bbox = torch.tensor(ocr_bbox) / torch.Tensor([w, h, w, h])
-        ocr_bbox=ocr_bbox.tolist()
+        ocr_bbox_norm = (torch.tensor(ocr_bbox) / torch.Tensor([w, h, w, h])).tolist()
     else:
-        print('no ocr bbox!!!')
-        ocr_bbox = None
+        if not ocr_text:
+            print('no ocr bbox!!!')
+        ocr_bbox_norm = []
 
-    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
+    ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox_norm, ocr_text) if int_box_area(box, w, h) > 0] 
     xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
     
@@ -439,17 +467,30 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
     # get the index of the first 'content': None
     starting_idx = next((i for i, box in enumerate(filtered_boxes_elem) if box['content'] is None), -1)
+    print('len(filtered_boxes):', len(filtered_boxes_elem), starting_idx)
+
+    if not filtered_boxes_elem:
+        encoded_image = None
+        if return_som_image:
+            pil_img = Image.fromarray(image_source)
+            buffered = io.BytesIO()
+            pil_img.save(buffered, format="PNG")
+            encoded_image = base64.b64encode(buffered.getvalue()).decode('ascii')
+        return encoded_image, {}, []
+
     filtered_boxes = torch.tensor([box['bbox'] for box in filtered_boxes_elem])
-    print('len(filtered_boxes):', len(filtered_boxes), starting_idx)
 
     # get parsed icon local semantics
     time1 = time.time()
     if use_local_semantics:
         caption_model = caption_model_processor['model']
         if 'phi3_v' in caption_model.config.model_type: 
-            parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox, image_source, caption_model_processor)
+            parsed_content_icon = get_parsed_content_icon_phi3v(filtered_boxes, ocr_bbox_norm, image_source, caption_model_processor)
         else:
-            parsed_content_icon = get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
+            if starting_idx >= 0:
+                parsed_content_icon = get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=prompt,batch_size=batch_size)
+            else:
+                parsed_content_icon = []
         ocr_text = [f"Text Box ID {i}: {txt}" for i, txt in enumerate(ocr_text)]
         icon_start = len(ocr_text)
         parsed_content_icon_ls = []
@@ -467,21 +508,21 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
 
     filtered_boxes = box_convert(boxes=filtered_boxes, in_fmt="xyxy", out_fmt="cxcywh")
 
-    phrases = [i for i in range(len(filtered_boxes))]
-    
-    # draw boxes
-    if draw_bbox_config:
-        annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, **draw_bbox_config)
-    else:
-        annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, text_scale=text_scale, text_padding=text_padding)
-    
-    pil_img = Image.fromarray(annotated_frame)
-    buffered = io.BytesIO()
-    pil_img.save(buffered, format="PNG")
-    encoded_image = base64.b64encode(buffered.getvalue()).decode('ascii')
-    if output_coord_in_ratio:
-        label_coordinates = {k: [v[0]/w, v[1]/h, v[2]/w, v[3]/h] for k, v in label_coordinates.items()}
-        assert w == annotated_frame.shape[1] and h == annotated_frame.shape[0]
+    encoded_image = None
+    label_coordinates = {}
+    if return_som_image:
+        phrases = [i for i in range(len(filtered_boxes))]
+        if draw_bbox_config:
+            annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, **draw_bbox_config)
+        else:
+            annotated_frame, label_coordinates = annotate(image_source=image_source, boxes=filtered_boxes, logits=logits, phrases=phrases, text_scale=text_scale, text_padding=text_padding)
+        pil_img = Image.fromarray(annotated_frame)
+        buffered = io.BytesIO()
+        pil_img.save(buffered, format="PNG")
+        encoded_image = base64.b64encode(buffered.getvalue()).decode('ascii')
+        if output_coord_in_ratio:
+            label_coordinates = {k: [v[0]/w, v[1]/h, v[2]/w, v[3]/h] for k, v in label_coordinates.items()}
+            assert w == annotated_frame.shape[1] and h == annotated_frame.shape[0]
 
     return encoded_image, label_coordinates, filtered_boxes_elem
 
@@ -501,6 +542,27 @@ def get_xywh_yolo(input):
     x, y, w, h = int(x), int(y), int(w), int(h)
     return x, y, w, h
 
+def _parse_paddle_ocr_result(ocr_output, text_threshold: float):
+    """Normalize PaddleOCR 2.x and 3.x outputs to (coord, text) lists."""
+    coord, text = [], []
+    if not ocr_output:
+        return coord, text
+    page = ocr_output[0]
+    # PaddleOCR 3.x (paddlex OCRResult)
+    if hasattr(page, "get") and "rec_texts" in page:
+        for poly, txt, score in zip(page["rec_polys"], page["rec_texts"], page["rec_scores"]):
+            if score > text_threshold:
+                coord.append(poly)
+                text.append(txt)
+        return coord, text
+    # PaddleOCR 2.x: list of [box, (text, score)]
+    for item in page:
+        if item[1][1] > text_threshold:
+            coord.append(item[0])
+            text.append(item[1][0])
+    return coord, text
+
+
 def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, output_bb_format='xywh', goal_filtering=None, easyocr_args=None, use_paddleocr=False):
     if isinstance(image_source, str):
         image_source = Image.open(image_source)
@@ -514,9 +576,8 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
             text_threshold = 0.5
         else:
             text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
+        ocr_output = paddle_ocr.ocr(image_np)
+        coord, text = _parse_paddle_ocr_result(ocr_output, text_threshold)
     else:  # EasyOCR
         if easyocr_args is None:
             easyocr_args = {}

@@ -8,12 +8,15 @@ import io
 
 
 import base64, os
-from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
+from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img, get_torch_device
 import torch
 from PIL import Image
 
+DEVICE_NAME = get_torch_device()
+print(f"OmniParser inference device: {DEVICE_NAME}")
+
 yolo_model = get_yolo_model(model_path='weights/icon_detect/model.pt')
-caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence")
+caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path="weights/icon_caption_florence", device=DEVICE_NAME)
 # caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path="weights/icon_caption_blip2")
 
 MARKDOWN = """
@@ -93,4 +96,4 @@ with gr.Blocks() as demo:
     )
 
 # demo.launch(debug=False, show_error=True, share=True)
-demo.launch(share=True, server_port=7861, server_name='127.0.0.1')
+demo.launch(share=False, server_port=7861, server_name='0.0.0.0')

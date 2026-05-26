@@ -61,6 +61,103 @@ To run gradio demo, simply run:
 python gradio_demo.py
 ```
 
+本 fork 中 Gradio 会按 `cuda → mps → cpu` 自动选择推理设备，并监听 `0.0.0.0:7861`（局域网可访问，`share=False`）。
+
+---
+
+## 本地修改说明
+
+本仓库在 [microsoft/OmniParser](https://github.com/microsoft/OmniParser) 基础上做了以下扩展，便于在 **Mac（Apple Silicon）** 上长期运行 HTTP 服务，并从局域网或其它机器调用。
+
+### 1. Apple Silicon / 多设备推理（`util/utils.py`、`util/omniparser.py`）
+
+- 新增 `get_torch_device()`、`resolve_torch_device()`：设备优先级为 **CUDA → MPS → CPU**；CLI/API 支持 `--device auto|cpu|cuda|mps`。
+- Florence2 图标描述在 **CUDA 与 MPS** 上均使用 `float16`，在 CPU 上使用 `float32`。
+- `Omniparser` 初始化时按配置解析设备，并在日志中打印当前设备。
+
+### 2. FastAPI 服务增强（`omnitool/omniparserserver/omniparserserver.py`）
+
+| 变更 | 说明 |
+|------|------|
+| 默认监听 | `--host 0.0.0.0`（本机 + 局域网） |
+| 默认设备 | `--device auto` |
+| 新参数 | `--iou_threshold`（默认 `0.7`，与检测框合并相关） |
+| `GET /probe/` | 返回 `device`、`box_threshold`、`iou_threshold` |
+| `POST /parse/` | 支持按请求控制输出内容与阈值（见下表） |
+| 错误处理 | 非法参数返回 HTTP 400 |
+| 启动方式 | `uvicorn.run(app, reload=False)`，避免 reload 导致模型重复加载 |
+
+**`POST /parse/` 请求体（在原有 `base64_image` 之外）：**
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `response_mode` | `"all"` \| `"image"` \| `"json"` | `"all"` | `all`：标注图 + JSON；`image`：仅标注图；`json`：仅 JSON |
+| `return_parsed_content` | `bool` | `true` | 为 `false` 时只做 OCR + 框，不跑 Florence2 图标语义（`json`/`all` 模式下有效） |
+| `box_threshold` | `float?` | 服务端默认 `0.05` | 图标检测置信度，越高框越少 |
+| `iou_threshold` | `float?` | 服务端默认 `0.7` | 重叠框合并阈值 |
+
+手动启动示例：
+
+```bash
+python -m omnitool.omniparserserver.omniparserserver \
+  --som_model_path weights/icon_detect/model.pt \
+  --caption_model_name florence2 \
+  --caption_model_path weights/icon_caption_florence \
+  --device auto --host 0.0.0.0 --port 8000
+```
+
+完整接口说明见 [`launchd/API.md`](launchd/API.md)（含 curl 示例与 `response_mode` 组合说明）。
+
+### 3. 推理管线修复与优化（`util/utils.py`、`util/omniparser.py`）
+
+- **`get_som_labeled_img`**：新增 `return_som_image`，可在只要 JSON、不要标注图时跳过绘图与 PNG 编码。
+- **空检测 / 边界情况**：无有效框时仍可按需返回原图 base64 或空列表，避免异常。
+- **`starting_idx == 0`**：修正「首个待 caption 图标下标为 0」时被误判为 falsy 的 bug。
+- **PaddleOCR**：兼容 2.x 与 3.x（`paddlex` OCRResult）输出格式。
+- **OCR bbox**：归一化与空列表处理更稳健。
+
+### 4. 依赖（`requirements.txt`）
+
+- 将 `transformers` 固定为 **`4.41.2`**，与 Florence2 远程代码加载行为保持一致。
+
+### 5. macOS 开机自启（`launchd/`）
+
+通过 **launchd User Agent** 在后台常驻 FastAPI 服务：
+
+| 文件 | 作用 |
+|------|------|
+| `launchd/com.omniparser.server.plist` | 服务模板（`0.0.0.0:8000`、`device=auto`、权重路径等） |
+| `launchd/load.sh` | 解析 conda `omni` 环境、安装 plist、启动服务 |
+| `launchd/unload.sh` | 停止并卸载服务 |
+| `launchd/API.md` | HTTP API 文档 |
+| `logs/omniparser.{stdout,stderr}.log` | 运行日志（由 plist 写入，目录需存在） |
+
+```bash
+# 安装并启动（需已 conda activate omni 且 weights 已下载）
+./launchd/load.sh
+
+# 健康检查（Mac M 系列上 device 通常为 mps）
+curl http://127.0.0.1:8000/probe/
+
+# 停止服务
+./launchd/unload.sh
+```
+
+可通过环境变量 `OMNIPARSER_PYTHON` 指定 Python 解释器路径。`load.sh` 会优先使用 `~/miniconda3/envs/omni/bin/python` 或 `~/anaconda3/envs/omni/bin/python`。
+
+### 修改文件一览
+
+| 路径 | 概要 |
+|------|------|
+| `util/utils.py` | MPS/自动设备、PaddleOCR 兼容、SOM 管线修复 |
+| `util/omniparser.py` | `response_mode`、按请求阈值、可选返回字段 |
+| `omnitool/omniparserserver/omniparserserver.py` | API 扩展、probe、LAN 监听 |
+| `gradio_demo.py` | 自动设备、`0.0.0.0` 绑定 |
+| `requirements.txt` | `transformers==4.41.2` |
+| `launchd/*` | macOS 守护进程与 API 文档（新增） |
+
+---
+
 ## Model Weights License
 For the model checkpoints on huggingface model hub, please note that icon_detect model is under AGPL license since it is a license inherited from the original yolo model. And icon_caption_blip2 & icon_caption_florence is under MIT license. Please refer to the LICENSE file in the folder of each model: https://huggingface.co/microsoft/OmniParser.
 
